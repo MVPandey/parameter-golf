@@ -790,7 +790,8 @@ def main():
                     ce, jl, vl_, vs = model.forward_jepa(x, y, tgt_banks)
                     loss = ce + jepa_w * jl + args.vicreg_var_weight * vl_
                 else:
-                    loss = compiled(x, y)
+                    # use uncompiled model to match jepa path (fair comparison)
+                    loss = model(x, y)
                     jl = vl_ = torch.zeros(())
                     vs = {'var': 0., 'cov': 0., 'z_std_mean': 0., 'z_std_min': 0.}
             tloss += loss.detach()

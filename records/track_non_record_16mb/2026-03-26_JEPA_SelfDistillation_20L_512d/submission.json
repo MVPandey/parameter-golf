@@ -1,22 +1,18 @@
 {
   "author": "Manav Pandey",
   "github_id": "MVPandey",
-  "name": "JEPA Self-Distillation with EMA Target Encoder + VICReg (20L/512d)",
-  "blurb": "Full JEPA self-distillation with EMA target encoder as auxiliary training objective for autoregressive LM. VICReg on target encoder output prevents collapse. Context encoder only in artifact.",
+  "name": "JEPA Self-Distillation: Negative Results",
+  "blurb": "Controlled A/B showing JEPA auxiliary self-distillation with EMA target encoder doesn't help autoregressive LM. Vanilla CE is 40% faster and converges to same or better BPB. Pushing in the spirit of good science.",
   "date": "2026-03-26",
   "track": "non-record-unlimited-compute-16mb",
-  "val_loss": 0.0,
-  "val_bpb": 0.0,
-  "pre_quant_val_loss": 0.0,
-  "pre_quant_val_bpb": 0.0,
-  "step_stop": 0,
-  "wallclock_seconds": 7200,
-  "bytes_total": 0,
-  "bytes_model_int6_lzma": 0,
-  "bytes_code": 0,
-  "seeds": {
-    "42": {"val_bpb": 0.0, "artifact_bytes": 0},
-    "1234": {"val_bpb": 0.0, "artifact_bytes": 0},
-    "5678": {"val_bpb": 0.0, "artifact_bytes": 0}
-  }
+  "results_11L": {
+    "jepa": {"val_bpb": 1.1896, "val_bpb_live": 1.1811, "steps": 5751, "step_time_ms": 310, "artifact_bytes": 16324677},
+    "vanilla": {"val_bpb": 1.1841, "val_bpb_live": 1.1732, "steps": 8120, "step_time_ms": 222, "artifact_bytes": 16274262}
+  },
+  "results_20L": {
+    "jepa": {"val_bpb": 1.1590, "val_bpb_live": 1.1537, "steps": 3635, "step_time_ms": 495},
+    "vanilla": {"val_bpb": 1.1598, "val_bpb_live": 1.1545, "steps": 3617, "step_time_ms": 498}
+  },
+  "wallclock_seconds": 1800,
+  "hardware": "8xH100 SXM"
 }
