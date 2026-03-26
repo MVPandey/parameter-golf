@@ -782,11 +782,17 @@ def main():
         # Anneal JEPA weight to 0 during warmdown (pure CE for final steps)
         jepa_w = args.jepa_weight * scale  # scale goes 1→0 during warmdown
 
+        use_jepa = args.jepa_weight > 0
         for _ in range(ga):
             x, y = loader.next_batch(args.train_batch_tokens, args.train_seq_len, ga)
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                ce, jl, vl_, vs = model.forward_jepa(x, y, tgt_banks)
-                loss = ce + jepa_w * jl + args.vicreg_var_weight * vl_
+                if use_jepa:
+                    ce, jl, vl_, vs = model.forward_jepa(x, y, tgt_banks)
+                    loss = ce + jepa_w * jl + args.vicreg_var_weight * vl_
+                else:
+                    loss = compiled(x, y)
+                    jl = vl_ = torch.zeros(())
+                    vs = {'var': 0., 'cov': 0., 'z_std_mean': 0., 'z_std_min': 0.}
             tloss += loss.detach()
             (loss / ga).backward()
             jepa_total += jl.item() / ga; vic_total += vl_.item() / ga
