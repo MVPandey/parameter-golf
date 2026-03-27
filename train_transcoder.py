@@ -471,7 +471,7 @@ def main():
         trained[li] = tc
         all_results[f'layer_{li}'] = {
             'analysis': analysis,
-            'history': {k: [float(v) for v in vs] for k, vs in history.items()},
+            'history': {k: ([float(v) for v in vs] if isinstance(vs, list) else float(vs)) for k, vs in history.items()},
         }
 
     # cross-layer similarity
