@@ -343,7 +343,7 @@ def main():
     # import model from train_gpt.py (upstream naive baseline: GPT + Hyperparameters)
     import importlib.util
     spec = importlib.util.spec_from_file_location('train_gpt', 'train_gpt.py')
-    tg = importlib.util.import_module_from_spec(spec)
+    tg = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(tg)
 
     a = tg.Hyperparameters()
