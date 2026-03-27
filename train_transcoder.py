@@ -56,11 +56,10 @@ class Transcoder(nn.Module):
     def encode(self, x: Tensor) -> Tensor:
         """encode and apply topk sparsity. returns sparse activations."""
         h = self.encoder(x)  # (batch, n_features)
-        # topk: keep only top k activations, zero the rest
         topk_vals, topk_idx = h.topk(self.k, dim=-1)
-        sparse = torch.zeros_like(h)
-        sparse.scatter_(-1, topk_idx, F.relu(topk_vals))
-        return sparse
+        mask = torch.zeros_like(h)
+        mask.scatter_(-1, topk_idx, 1.0)
+        return F.relu(h) * mask
 
     def decode(self, sparse: Tensor) -> Tensor:
         return self.decoder(sparse)
@@ -71,12 +70,12 @@ class Transcoder(nn.Module):
         recon = self.decode(sparse)
         return recon, sparse
 
-    def aux_loss(self, x: Tensor, sparse: Tensor) -> Tensor:
-        """auxiliary loss on the features that didn't make the topk cut.
-        encourages all features to be useful, preventing dead features."""
+    def aux_loss(self, x: Tensor, target: Tensor, sparse: Tensor) -> Tensor:
+        """auxiliary loss on features that didn't make the topk cut.
+        trains the 'next-k' features to also reconstruct the mlp output,
+        preventing dead features."""
         h = self.encoder(x)
         topk_vals, topk_idx = h.topk(self.k, dim=-1)
-        # mask out the topk features, take the next-k activations
         mask = torch.zeros_like(h, dtype=torch.bool)
         mask.scatter_(-1, topk_idx, True)
         aux_h = h.masked_fill(mask, float('-inf'))
@@ -84,7 +83,7 @@ class Transcoder(nn.Module):
         aux_sparse = torch.zeros_like(h)
         aux_sparse.scatter_(-1, aux_topk_idx, F.relu(aux_topk_vals))
         aux_recon = self.decode(aux_sparse)
-        return F.mse_loss(aux_recon, x.detach())
+        return F.mse_loss(aux_recon, target.detach())
 
     @torch.no_grad()
     def update_feature_counts(self, sparse: Tensor):
@@ -205,7 +204,7 @@ def train_transcoder(
 
         recon, sparse = tc(x)
         mse_loss = F.mse_loss(recon, target)
-        aux = tc.aux_loss(x, sparse) * aux_coeff
+        aux = tc.aux_loss(x, target, sparse) * aux_coeff
         loss = mse_loss + aux
 
         opt.zero_grad(set_to_none=True)
@@ -266,11 +265,20 @@ def analyze_transcoder(tc: Transcoder, pre_mlp: Tensor, mlp_output: Tensor,
         active_mask = sparse > 0
         mean_activation = sparse[active_mask].mean().item() if active_mask.any() else 0.0
 
-        # pca baseline
+        # pca baseline: rank-48 linear regression from input to output
+        # this measures how well a linear bottleneck approximates the mlp
+        n_pca = min(10000, x.shape[0])
+        x_c = x[:n_pca] - x[:n_pca].mean(dim=0)
+        t_c = target[:n_pca] - target[:n_pca].mean(dim=0)
         from torch.linalg import svd
-        centered = target - target.mean(dim=0)
-        _, s, Vh = svd(centered[:10000], full_matrices=False)
-        pca_var_explained = (s[:48] ** 2).sum() / (s ** 2).sum()
+        U, s, Vh = svd(x_c, full_matrices=False)
+        # project input to rank-48, then least-squares fit to target
+        x_proj = U[:, :48] * s[:48]  # (n, 48)
+        # optimal linear map: (X^T X)^{-1} X^T Y, but simpler via pseudoinverse
+        W = torch.linalg.lstsq(x_proj, t_c).solution  # (48, d_model)
+        pca_recon = x_proj @ W
+        pca_mse = F.mse_loss(pca_recon, t_c).item()
+        pca_var_explained = 1.0 - pca_mse / max(t_c.var().item(), 1e-8)
 
     return {
         'explained_variance': explained_var,
@@ -348,7 +356,11 @@ def main():
         logit_softcap=a.logit_softcap, rope_base=a.rope_base,
         qk_gain_init=a.qk_gain_init,
     ).to(device).bfloat16()
-    model.load_state_dict(checkpoint, strict=False)
+    missing, unexpected = model.load_state_dict(checkpoint, strict=False)
+    if missing:
+        print(f'  warning: missing keys: {missing[:5]}{"..." if len(missing) > 5 else ""}')
+    if unexpected:
+        print(f'  warning: unexpected keys: {unexpected[:5]}{"..." if len(unexpected) > 5 else ""}')
     model.eval()
     print(f'model loaded: {sum(p.numel() for p in model.parameters()):,} params')
 
