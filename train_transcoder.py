@@ -166,7 +166,7 @@ def train_transcoder(
     lr_min: float = 3e-5,
     warmup_steps: int = 1000,
     aux_coeff: float = 1 / 32,
-    n_epochs: int = 50,
+    n_epochs: int = 10,
     device: torch.device = torch.device('cuda'),
     log_every: int = 100,
     test_frac: float = 0.2,
