@@ -166,7 +166,7 @@ def train_transcoder(
     lr_min: float = 3e-5,
     warmup_steps: int = 1000,
     aux_coeff: float = 1 / 32,
-    n_epochs: int = 1,
+    n_epochs: int = 50,
     device: torch.device = torch.device('cuda'),
     log_every: int = 100,
 ) -> tuple[Transcoder, dict]:
@@ -291,7 +291,7 @@ def analyze_transcoder(tc: Transcoder, pre_mlp: Tensor, mlp_output: Tensor,
         'feature_freq_min': feature_freq.min().item(),
         'feature_freq_max': feature_freq.max().item(),
         'feature_freq_median': feature_freq.median().item(),
-        'pca_48d_variance_explained': pca_var_explained.item(),
+        'pca_48d_variance_explained': float(pca_var_explained),
     }
 
 
