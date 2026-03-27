@@ -172,10 +172,14 @@ def train_transcoder(
 ) -> tuple[Transcoder, dict]:
     """train a single transcoder on collected activations."""
 
-    # rms normalize inputs
-    rms = pre_mlp.norm(dim=-1, keepdim=True) / math.sqrt(d_model)
-    pre_norm = pre_mlp / (rms + 1e-6)
-    target_norm = mlp_output / (rms + 1e-6)
+    # rms normalize input and target independently
+    # (the mlp amplifies magnitude ~500x via relu^2, so sharing normalization
+    # creates a pathological loss landscape where a few high-magnitude directions
+    # dominate and kill most features)
+    rms_in = pre_mlp.norm(dim=-1, keepdim=True) / math.sqrt(d_model)
+    rms_out = mlp_output.norm(dim=-1, keepdim=True) / math.sqrt(d_model)
+    pre_norm = pre_mlp / (rms_in + 1e-6)
+    target_norm = mlp_output / (rms_out + 1e-6)
 
     n_tokens = pre_norm.shape[0]
     n_steps = (n_tokens * n_epochs) // batch_size
@@ -241,9 +245,10 @@ def train_transcoder(
 def analyze_transcoder(tc: Transcoder, pre_mlp: Tensor, mlp_output: Tensor,
                        d_model: int, device: torch.device, n_samples: int = 50000) -> dict:
     """run analysis on a trained transcoder."""
-    rms = pre_mlp[:n_samples].norm(dim=-1, keepdim=True) / math.sqrt(d_model)
-    pre_norm = pre_mlp[:n_samples] / (rms + 1e-6)
-    target_norm = mlp_output[:n_samples] / (rms + 1e-6)
+    rms_in = pre_mlp[:n_samples].norm(dim=-1, keepdim=True) / math.sqrt(d_model)
+    rms_out = mlp_output[:n_samples].norm(dim=-1, keepdim=True) / math.sqrt(d_model)
+    pre_norm = pre_mlp[:n_samples] / (rms_in + 1e-6)
+    target_norm = mlp_output[:n_samples] / (rms_out + 1e-6)
 
     tc.eval()
     with torch.no_grad():
