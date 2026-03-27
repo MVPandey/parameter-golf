@@ -169,21 +169,35 @@ def train_transcoder(
     n_epochs: int = 50,
     device: torch.device = torch.device('cuda'),
     log_every: int = 100,
+    test_frac: float = 0.2,
 ) -> tuple[Transcoder, dict]:
     """train a single transcoder on collected activations."""
 
     # rms normalize input and target independently
-    # (the mlp amplifies magnitude ~500x via relu^2, so sharing normalization
-    # creates a pathological loss landscape where a few high-magnitude directions
-    # dominate and kill most features)
+    # directional decomposition: the transcoder learns to predict the direction
+    # of the mlp output. magnitude prediction is tracked separately.
     rms_in = pre_mlp.norm(dim=-1, keepdim=True) / math.sqrt(d_model)
     rms_out = mlp_output.norm(dim=-1, keepdim=True) / math.sqrt(d_model)
     pre_norm = pre_mlp / (rms_in + 1e-6)
     target_norm = mlp_output / (rms_out + 1e-6)
 
-    n_tokens = pre_norm.shape[0]
+    # train/test split to check overfitting
+    n_total = pre_norm.shape[0]
+    n_test = int(n_total * test_frac)
+    n_train = n_total - n_test
+    perm = torch.randperm(n_total)
+    train_idx, test_idx = perm[:n_train], perm[n_train:]
+
+    pre_train, target_train = pre_norm[train_idx], target_norm[train_idx]
+    pre_test, target_test = pre_norm[test_idx], target_norm[test_idx]
+    # keep raw versions for unnormalized eval
+    raw_pre_test = pre_mlp[test_idx]
+    raw_target_test = mlp_output[test_idx]
+    rms_out_test = rms_out[test_idx]
+
+    n_tokens = pre_train.shape[0]
     n_steps = (n_tokens * n_epochs) // batch_size
-    print(f'  training: {n_tokens:,} tokens, {n_steps:,} steps, {n_epochs} epochs')
+    print(f'  training: {n_tokens:,} train, {n_test:,} test, {n_steps:,} steps, {n_epochs} epochs')
 
     tc = Transcoder(d_model, n_features, k).to(device)
     opt = torch.optim.Adam(tc.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
@@ -201,10 +215,10 @@ def train_transcoder(
         for g in opt.param_groups:
             g['lr'] = cur_lr
 
-        # random batch
-        idx = torch.randint(0, n_tokens, (batch_size,))
-        x = pre_norm[idx].to(device)
-        target = target_norm[idx].to(device)
+        # random batch from train split
+        idx = torch.randint(0, n_train, (batch_size,))
+        x = pre_train[idx].to(device)
+        target = target_train[idx].to(device)
 
         recon, sparse = tc(x)
         mse_loss = F.mse_loss(recon, target)
@@ -234,6 +248,29 @@ def train_transcoder(
             history['explained_var'].append(ev)
             history['dead_frac'].append(dead)
             history['step'].append(step + 1)
+
+    # evaluate on held-out test set (both normalized and unnormalized)
+    tc.eval()
+    with torch.no_grad():
+        xt = pre_test.to(device)
+        tt = target_test.to(device)
+        recon_test, _ = tc(xt)
+        test_mse_norm = F.mse_loss(recon_test, tt).item()
+        test_ev_norm = 1.0 - test_mse_norm / max(tt.var().item(), 1e-8)
+
+        # unnormalized: reconstruct in original scale
+        # recon_unnorm = recon_direction * original_output_rms
+        recon_unnorm = recon_test.cpu() * rms_out_test
+        raw_t = raw_target_test
+        unnorm_mse = F.mse_loss(recon_unnorm, raw_t).item()
+        unnorm_ev = 1.0 - unnorm_mse / max(raw_t.var().item(), 1e-8)
+
+    print(f'  test (directional): ev={test_ev_norm:.4f} mse={test_mse_norm:.6f}')
+    print(f'  test (unnormalized): ev={unnorm_ev:.4f} mse={unnorm_mse:.2f}')
+    history['test_ev_directional'] = test_ev_norm
+    history['test_ev_unnormalized'] = unnorm_ev
+    history['test_mse_directional'] = test_mse_norm
+    history['test_mse_unnormalized'] = unnorm_mse
 
     return tc, history
 
@@ -286,8 +323,8 @@ def analyze_transcoder(tc: Transcoder, pre_mlp: Tensor, mlp_output: Tensor,
         pca_var_explained = 1.0 - pca_mse / max(t_c.var().item(), 1e-8)
 
     return {
-        'explained_variance': explained_var,
-        'mse': mse,
+        'directional_explained_variance': explained_var,
+        'directional_mse': mse,
         'target_variance': var,
         'active_features_per_token': active_per_token,
         'dead_features': dead,
