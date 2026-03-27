@@ -461,7 +461,7 @@ def main():
         # analyze
         print(f'  analyzing...')
         analysis = analyze_transcoder(tc, pre_mlp, mlp_out, a.model_dim, device)
-        print(f'  explained_variance={analysis["explained_variance"]:.4f}')
+        print(f'  directional_ev={analysis["directional_explained_variance"]:.4f}')
         print(f'  dead_features={analysis["dead_features"]}/{args.n_features}')
         print(f'  pca_48d_baseline={analysis["pca_48d_variance_explained"]:.4f}')
         print(f'  active_per_token={analysis["active_features_per_token"]:.1f}')
