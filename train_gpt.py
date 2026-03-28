@@ -1433,7 +1433,7 @@ def main() -> None:
                 x, y = local[:-1].reshape(-1, sl), local[1:].reshape(-1, sl)
                 hidden_cache.clear()
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    compiled_eval(x, y)
+                    eval_model(x, y)
                 h = hidden_cache[0]
                 logits = F.linear(h.to(device), eval_model.tok_emb.weight.float())
                 logits = args.logit_softcap * torch.tanh(logits / args.logit_softcap)
@@ -1470,7 +1470,7 @@ def main() -> None:
                 x, y = local[:-1].reshape(-1, sl), local[1:].reshape(-1, sl)
                 hidden_cache.clear()
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    compiled_eval(x, y)
+                    eval_model(x, y)
                 h = hidden_cache[0]
                 logits = F.linear(h.to(device), eval_model.tok_emb.weight.float())
                 logits = args.logit_softcap * torch.tanh(logits / args.logit_softcap)
