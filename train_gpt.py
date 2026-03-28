@@ -1418,7 +1418,7 @@ def main() -> None:
                 return (s.proj(h) @ s.tok_emb.weight.T) / torch.exp(s.log_temp).clamp(0.01, 10.0)
 
         hidden_cache = []
-        def capture_h(module, input, output): hidden_cache.append(output.detach().float().cpu())
+        def capture_h(module, input, output): hidden_cache.append(output.detach().cpu())
         handle = eval_model.final_norm.register_forward_hook(capture_h)
 
         all_h, all_logits, all_tgt = [], [], []
@@ -1435,7 +1435,8 @@ def main() -> None:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     eval_model(x, y)
                 h = hidden_cache[0]
-                logits = F.linear(h.to(device), eval_model.tok_emb.weight.float())
+                h_dev = h.to(device)
+                logits = F.linear(h_dev, eval_model.tok_emb.weight.to(h_dev.dtype))
                 logits = args.logit_softcap * torch.tanh(logits / args.logit_softcap)
                 all_h.append(h); all_logits.append(logits.float().cpu()); all_tgt.append(y.cpu())
         handle.remove()
@@ -1472,7 +1473,8 @@ def main() -> None:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     eval_model(x, y)
                 h = hidden_cache[0]
-                logits = F.linear(h.to(device), eval_model.tok_emb.weight.float())
+                h_dev = h.to(device)
+                logits = F.linear(h_dev, eval_model.tok_emb.weight.to(h_dev.dtype))
                 logits = args.logit_softcap * torch.tanh(logits / args.logit_softcap)
                 logits = logits + enet(h.to(device)).float()
                 bl = F.cross_entropy(logits.reshape(-1, args.vocab_size).float(), y.reshape(-1))
@@ -1504,7 +1506,8 @@ def main() -> None:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     ar_bl = eval_model(x, y)
                 h = hidden_cache[0]
-                logits = F.linear(h.to(device), eval_model.tok_emb.weight.float())
+                h_dev = h.to(device)
+                logits = F.linear(h_dev, eval_model.tok_emb.weight.to(h_dev.dtype))
                 logits = args.logit_softcap * torch.tanh(logits / args.logit_softcap)
                 logits_e = logits + enet(h.to(device)).float()
                 bl = F.cross_entropy(logits_e.reshape(-1, args.vocab_size).float(), y.reshape(-1))
