@@ -1,0 +1,16 @@
+{
+  "author": "Manav Pandey",
+  "github_id": "MVPandey",
+  "name": "Learned Energy Correction: Product of Experts for Eval-Time BPB Improvement",
+  "blurb": "Small energy network (459K params) trained at eval time on frozen model hidden states. Adds a learned continuous correction to AR logits via product of experts. Score-first protocol (same legality as TTT). -0.007 BPB on baseline.",
+  "date": "2026-03-28",
+  "track": "non-record",
+  "hardware": "8xH100 SXM",
+  "seeds": {
+    "42": {"baseline_bpb": 1.2375, "energy_bpb": 1.2309, "delta": -0.0066},
+    "1234": {"baseline_bpb": 0.0, "energy_bpb": 0.0, "delta": 0.0},
+    "5678": {"baseline_bpb": 0.0, "energy_bpb": 0.0, "delta": 0.0}
+  },
+  "energy_net_params": 459265,
+  "energy_training_seconds": 54
+}
