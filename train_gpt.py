@@ -70,6 +70,13 @@ class Hyperparameters:
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
 
+    # Energy correction (eval-time product of experts)
+    energy_enabled = bool(int(os.environ.get("ENERGY_ENABLED", "1")))
+    energy_d = int(os.environ.get("ENERGY_D", 256))
+    energy_lr = float(os.environ.get("ENERGY_LR", 1e-3))
+    energy_epochs = int(os.environ.get("ENERGY_EPOCHS", 10))
+    energy_tokens = int(os.environ.get("ENERGY_TOKENS", 2_000_000))
+
     # Optimizer hyperparameters.
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
     head_lr = float(os.environ.get("HEAD_LR", 0.008))
@@ -1117,6 +1124,131 @@ def main() -> None:
         f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
     )
     log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+
+    # -----------------------------
+    # ENERGY CORRECTION (eval-time product of experts)
+    # -----------------------------
+    # score-first protocol: the model has already been evaluated above.
+    # now we collect hidden states, train a small energy correction network,
+    # and re-score with the combined (AR + energy) logits.
+
+    if args.energy_enabled and rank == 0:
+        log0("energy_correction:starting")
+
+        class EnergyNet(nn.Module):
+            def __init__(self, d_model, vocab_size, d_energy):
+                super().__init__()
+                self.proj = nn.Sequential(
+                    nn.Linear(d_model, d_energy), nn.GELU(), nn.Linear(d_energy, d_energy))
+                self.tok_emb = nn.Embedding(vocab_size, d_energy)
+                self.log_temp = nn.Parameter(torch.tensor(0.0))
+                for m in self.proj.modules():
+                    if isinstance(m, nn.Linear):
+                        nn.init.xavier_uniform_(m.weight)
+                        nn.init.zeros_(m.bias)
+                nn.init.normal_(self.tok_emb.weight, std=0.01)
+            def forward(self, h):
+                z = self.proj(h)
+                return (z @ self.tok_emb.weight.T) / torch.exp(self.log_temp).clamp(0.01, 10.0)
+
+        # collect hidden states from the roundtripped model (score-first: already evaluated)
+        hidden_cache = []
+        def capture_hidden(module, input, output):
+            hidden_cache.append(output.detach().float().cpu())
+        handle = base_model.final_norm.register_forward_hook(capture_hidden)
+
+        all_h, all_logits, all_targets = [], [], []
+        energy_tokens = min(args.energy_tokens, val_tokens.numel() - 1)
+        n_seqs = energy_tokens // args.train_seq_len
+
+        base_model.eval()
+        with torch.inference_mode():
+            for bs in range(0, n_seqs, 8):
+                be = min(bs + 8, n_seqs)
+                sl = args.train_seq_len
+                local = val_tokens[bs*sl:be*sl+1].to(device=device, dtype=torch.int64)
+                x = local[:-1].reshape(-1, sl)
+                y = local[1:].reshape(-1, sl)
+                hidden_cache.clear()
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    model(x, y)
+                h = hidden_cache[0]
+                logits = F.linear(h.to(device), base_model.tok_emb.weight.float())
+                logits = args.logit_softcap * torch.tanh(logits / args.logit_softcap)
+                all_h.append(h)
+                all_logits.append(logits.float().cpu())
+                all_targets.append(y.cpu())
+        handle.remove()
+
+        all_h = torch.cat(all_h)
+        all_logits = torch.cat(all_logits)
+        all_targets = torch.cat(all_targets)
+        log0(f"energy_correction:collected {all_h.shape[0]} seqs x {all_h.shape[1]} tokens")
+
+        # train energy net
+        n_train = int(all_h.shape[0] * 0.8)
+        enet = EnergyNet(args.model_dim, args.vocab_size, args.energy_d).to(device)
+        eopt = torch.optim.Adam(enet.parameters(), lr=args.energy_lr)
+        n_steps = (n_train * args.energy_epochs) // 32
+
+        t_energy = time.perf_counter()
+        for step in range(n_steps):
+            prog = step / max(n_steps - 1, 1)
+            for g in eopt.param_groups:
+                g['lr'] = args.energy_lr * 0.5 * (1 + math.cos(math.pi * prog))
+            idx = torch.randint(0, n_train, (32,))
+            h = all_h[idx].to(device)
+            ar = all_logits[idx].to(device)
+            tgt = all_targets[idx].to(device)
+            combined = ar + enet(h)
+            loss = F.cross_entropy(combined.reshape(-1, args.vocab_size), tgt.reshape(-1))
+            eopt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(enet.parameters(), 1.0)
+            eopt.step()
+
+        log0(f"energy_correction:trained {n_steps} steps in {time.perf_counter()-t_energy:.1f}s")
+
+        # full eval with energy correction
+        enet.eval()
+        hidden_cache.clear()
+        handle = base_model.final_norm.register_forward_hook(capture_hidden)
+
+        loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+        token_count = torch.zeros((), device=device, dtype=torch.float64)
+        byte_count = torch.zeros((), device=device, dtype=torch.float64)
+        total_seqs = (val_tokens.numel() - 1) // args.train_seq_len
+
+        with torch.inference_mode():
+            for bs in range(0, total_seqs, 32):
+                be = min(bs + 32, total_seqs)
+                sl = args.train_seq_len
+                local = val_tokens[bs*sl:be*sl+1].to(device=device, dtype=torch.int64)
+                x = local[:-1].reshape(-1, sl)
+                y = local[1:].reshape(-1, sl)
+                hidden_cache.clear()
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    model(x, y)
+                h = hidden_cache[0]
+                logits = F.linear(h.to(device), base_model.tok_emb.weight.float())
+                logits = args.logit_softcap * torch.tanh(logits / args.logit_softcap)
+                logits = logits + enet(h.to(device)).float()
+                batch_loss = F.cross_entropy(logits.reshape(-1, args.vocab_size).float(), y.reshape(-1))
+                n = float(y.numel())
+                loss_sum += batch_loss.to(torch.float64) * n
+                token_count += n
+                tb = base_bytes_lut[y.reshape(-1)].to(torch.int16)
+                tb = tb + (has_leading_space_lut[y.reshape(-1)] & ~is_boundary_token_lut[x.reshape(-1)]).to(torch.int16)
+                byte_count += tb.to(torch.float64).sum()
+
+        handle.remove()
+        e_val_loss = (loss_sum / token_count).item()
+        e_bits = e_val_loss / math.log(2.0)
+        e_tpb = token_count.item() / byte_count.item()
+        e_val_bpb = e_bits * e_tpb
+        log0(f"energy_correction val_loss:{e_val_loss:.4f} val_bpb:{e_val_bpb:.4f}")
+        log0(f"energy_correction_exact val_loss:{e_val_loss:.8f} val_bpb:{e_val_bpb:.8f}")
+        log0(f"energy_correction delta_bpb:{e_val_bpb - q_val_bpb:+.6f}")
 
     if distributed:
         dist.destroy_process_group()
