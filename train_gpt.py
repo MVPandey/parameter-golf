@@ -1488,6 +1488,39 @@ def main() -> None:
         log0(f"energy_correction_exact val_loss:{e_loss:.8f} val_bpb:{e_bpb:.8f}")
         log0(f"energy_delta_bpb:{e_bpb - q_val_bpb:+.6f}")
 
+        # honest generalization test: train on first half, eval on second half only
+        half = total_seqs // 2
+        loss_h = torch.zeros((), device=device, dtype=torch.float64)
+        tc_h = torch.zeros((), device=device, dtype=torch.float64)
+        bc_h = torch.zeros((), device=device, dtype=torch.float64)
+        ar_loss_h = torch.zeros((), device=device, dtype=torch.float64)
+        handle = eval_model.final_norm.register_forward_hook(capture_h)
+        with torch.inference_mode():
+            for bs in range(half, total_seqs, 32):
+                be = min(bs + 32, total_seqs)
+                local = val_tokens[bs*sl:be*sl+1].to(device=device, dtype=torch.int64)
+                x, y = local[:-1].reshape(-1, sl), local[1:].reshape(-1, sl)
+                hidden_cache.clear()
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    ar_bl = eval_model(x, y)
+                h = hidden_cache[0]
+                logits = F.linear(h.to(device), eval_model.tok_emb.weight.float())
+                logits = args.logit_softcap * torch.tanh(logits / args.logit_softcap)
+                logits_e = logits + enet(h.to(device)).float()
+                bl = F.cross_entropy(logits_e.reshape(-1, args.vocab_size).float(), y.reshape(-1))
+                n = float(y.numel())
+                loss_h += bl.to(torch.float64) * n; ar_loss_h += ar_bl.to(torch.float64) * n; tc_h += n
+                tb = base_bytes_lut[y.reshape(-1)].to(torch.int16)
+                tb += (has_leading_space_lut[y.reshape(-1)] & ~is_boundary_token_lut[x.reshape(-1)]).to(torch.int16)
+                bc_h += tb.to(torch.float64).sum()
+        handle.remove()
+        gen_loss = (loss_h / tc_h).item(); gen_bpb = gen_loss / math.log(2.0) * tc_h.item() / bc_h.item()
+        ar_gen_loss = (ar_loss_h / tc_h).item(); ar_gen_bpb = ar_gen_loss / math.log(2.0) * tc_h.item() / bc_h.item()
+        log0(f"generalization_test (second half only):")
+        log0(f"  ar_only val_bpb:{ar_gen_bpb:.6f}")
+        log0(f"  energy  val_bpb:{gen_bpb:.6f}")
+        log0(f"  delta:{gen_bpb - ar_gen_bpb:+.6f}")
+
     if distributed:
         dist.destroy_process_group()
 if __name__ == "__main__":
