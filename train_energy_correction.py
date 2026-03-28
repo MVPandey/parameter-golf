@@ -74,11 +74,19 @@ class EnergyNet(nn.Module):
 
 
 def collect_hidden_states(model, tokens, seq_len, batch_size, device):
-    """run frozen AR model and collect (hidden_states, ar_logits, targets)."""
+    """run frozen AR model and collect (hidden_states, ar_logits, targets).
+    uses hooks to capture the final hidden state before the lm_head,
+    works with any model architecture."""
     model.eval()
     all_h = []
     all_logits = []
     all_targets = []
+
+    # hook into final_norm to capture hidden states
+    hidden_cache = []
+    def hook_fn(module, input, output):
+        hidden_cache.append(output.detach().float().cpu())
+    handle = model.final_norm.register_forward_hook(hook_fn)
 
     total_tokens = tokens.numel() - 1
     n_seqs = total_tokens // seq_len
@@ -93,34 +101,21 @@ def collect_hidden_states(model, tokens, seq_len, batch_size, device):
             x = local[:-1].reshape(actual_bs, seq_len)
             y = local[1:].reshape(actual_bs, seq_len)
 
-            # run model but capture hidden states before the lm_head
-            n = len(model.blocks)
-            h = model.tok_emb(x)
-            h = F.rms_norm(h, (h.size(-1),))
-            h = model.smear(h)
-            h0 = h.clone()
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                loss = model(x, y)
 
-            enc = model.num_encoder_layers
-            skips = []
-            for i in range(n):
-                h = model.blocks[i](h, h0)
-                if i < enc:
-                    skips.append(h.clone())
-                elif skips:
-                    si = i - enc
-                    if si < model.skip_weights.shape[0]:
-                        h = h + model.skip_weights[si].to(dtype=h.dtype)[None, None, :] * skips.pop()
+            # hidden_cache now has the final_norm output
+            h = hidden_cache.pop()
 
-            h = model.final_norm(h)
-
-            # AR logits
-            logits = F.linear(h, model.tok_emb.weight)
+            # recompute logits from h
+            logits = F.linear(h.to(device), model.tok_emb.weight.float())
             logits = model.logit_softcap * torch.tanh(logits / model.logit_softcap)
 
-            all_h.append(h.detach().float().cpu())
-            all_logits.append(logits.detach().float().cpu())
+            all_h.append(h)
+            all_logits.append(logits.float().cpu())
             all_targets.append(y.cpu())
 
+    handle.remove()
     return torch.cat(all_h), torch.cat(all_logits), torch.cat(all_targets)
 
 
